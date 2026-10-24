@@ -1,0 +1,1807 @@
+openapi: 3.1.0
+
+info:
+  title: Questboard API
+  version: 1.0.0
+  summary: REST API for Questboard — an adventure-themed task manager.
+  description: |
+    Normative API contract for the Questboard Flutter client.
+
+    **This file is the single source of truth for the wire format.** Every response
+    carries a worked `example` so the file doubles as the seed dataset and as the
+    fixture source for unit and integration tests.
+
+    ### Conventions
+    - Base path: `/api/v1` — included in every path below, so the endpoint the
+      user types into the Connect screen is just the origin (scheme://host[:port]).
+    - Content type: `application/json`
+    - Auth: `Authorization: Bearer <access_token>`
+    - Timestamps: ISO 8601 UTC, e.g. `2026-10-22T14:03:11Z`
+    - IDs: lowercase UUID v4
+    - Pagination: `limit` (default 50, max 200) + opaque `cursor`; responses are
+      `{ "items": [...], "next_cursor": "..." | null }`
+    - Errors: `{ "error": { "code": "...", "message": "...", "field": "..." } }`
+
+    ### Idempotency
+    `POST /quests` and `POST /quests/{id}/complete` accept a **client-generated** `id`.
+    Replaying the same `id` returns the existing record with `200 OK` instead of
+    creating a duplicate. This is what makes the offline outbox safe to retry.
+
+    ### XP model
+    - `total_xp` = sum of `xp_awarded` over all of the user's completions.
+    - `guild_xp[g]` = sum of `xp_awarded` over completions whose `guild` equals `g`.
+      Guild XP is a **subset** of total XP and never affects level or title. A user
+      with no-guild completions therefore has `Σ guild_xp < total_xp`.
+    - `level` and `title` are **derived** from `total_xp` using the client-side
+      default table (`cumXP(L) = 50 × (L − 1) × L`, level cap 50), optionally
+      overridden by `GET /meta/levels`.
+
+    ### Seed dataset
+    The signed-in user is `Riley_42`: **2,475 total XP → level 7 ("Pulse Weaver")**,
+    with 1,250 XP on `Chores` and 1,200 XP on `Work` (the remaining 25 XP comes from
+    a completion on a quest with no guild). Other users: `Morgan_88` (3,150 → level 8),
+    `Sam_77` (1,450 → level 5), `Ada_01` (900 → level 4), `Quiet_Runner` (420 → level 3).
+
+  contact:
+    name: Questboard team
+  license:
+    name: MIT
+
+servers:
+  - url: https://api.questboard.example
+    description: |
+      Placeholder production server (replace before release). The `/api/v1` prefix
+      is part of every path below, so the Connect screen's endpoint field holds
+      only the origin (scheme://host[:port]).
+  - url: http://127.0.0.1:4010
+    description: Local Prism mock server (npx @stoplight/prism-cli mock openapi.yaml -p 4010)
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Meta
+    description: Liveness, level configuration, banner presets
+  - name: Auth
+    description: Registration, login, token refresh, session
+  - name: Users
+    description: Profile and account management
+  - name: Quests
+    description: Quest CRUD, lifecycle, and per-viewer state
+  - name: Guilds
+    description: Derived guild groupings and per-guild XP
+  - name: Leaderboard
+    description: Global and per-guild rankings
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [Meta]
+      summary: Liveness and server version
+      description: Used by the Connect screen to validate a typed endpoint.
+      security: []
+      responses:
+        '200':
+          description: The server is reachable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              examples:
+                healthy:
+                  value:
+                    status: ok
+                    version: 1.0.0
+                    server_time: '2026-10-22T14:03:11Z'
+
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      summary: Create an account
+      description: |
+        Registers with **email + password only**. `username` and `avatar` are optional.
+        When `username` is omitted the server generates and persists a themed
+        anonymous `display_name` that remains stable across devices.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            examples:
+              minimal:
+                summary: Email and password only
+                value:
+                  email: riley@example.com
+                  password: correct-horse-battery
+              withProfile:
+                summary: With optional username and avatar
+                value:
+                  email: riley@example.com
+                  password: correct-horse-battery
+                  username: Riley_42
+                  avatar: ⚔️
+      responses:
+        '201':
+          description: Account created; the client proceeds straight to the main screen.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+              examples:
+                created:
+                  value:
+                    access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature
+                    refresh_token: dG9rZW4tcmVmcmVzaC0xMjM0NTY3
+                    token_type: Bearer
+                    expires_in: 3600
+                    user:
+                      id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                      email: riley@example.com
+                      username: Riley_42
+                      display_name: Riley_42
+                      avatar: ⚔️
+                      banner_preset_id: neon_grid
+                      total_xp: 2475
+                      created_at: '2026-10-01T09:12:00Z'
+                      updated_at: '2026-10-22T13:58:04Z'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Exchange credentials for tokens
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              basic:
+                value:
+                  email: riley@example.com
+                  password: correct-horse-battery
+      responses:
+        '200':
+          description: Signed in.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+              examples:
+                signedIn:
+                  value:
+                    access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature
+                    refresh_token: dG9rZW4tcmVmcmVzaC0xMjM0NTY3
+                    token_type: Bearer
+                    expires_in: 3600
+                    user:
+                      id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                      email: riley@example.com
+                      username: Riley_42
+                      display_name: Riley_42
+                      avatar: ⚔️
+                      banner_preset_id: neon_grid
+                      total_xp: 2475
+                      created_at: '2026-10-01T09:12:00Z'
+                      updated_at: '2026-10-22T13:58:04Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate the access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+                  examples: [dG9rZW4tcmVmcmVzaC0xMjM0NTY3]
+      responses:
+        '200':
+          description: A new access token.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, refresh_token, token_type, expires_in]
+                properties:
+                  access_token: { type: string }
+                  refresh_token: { type: string }
+                  token_type: { type: string, const: Bearer }
+                  expires_in: { type: integer, examples: [3600] }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user profile
+      responses:
+        '200':
+          description: The signed-in user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              examples:
+                me:
+                  value:
+                    id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                    email: riley@example.com
+                    username: Riley_42
+                    display_name: Riley_42
+                    avatar: ⚔️
+                    banner_preset_id: neon_grid
+                    total_xp: 2475
+                    created_at: '2026-10-01T09:12:00Z'
+                    updated_at: '2026-10-22T13:58:04Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/users/me:
+    patch:
+      tags: [Users]
+      summary: Update the current user's profile
+      description: Update username, avatar, or banner preset. Omitted fields are unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: [string, 'null']
+                  maxLength: 40
+                  description: Set to null to revert to the anonymous display name.
+                  examples: ['Riley_42']
+                avatar:
+                  type: [string, 'null']
+                  maxLength: 8
+                  description: Emoji glyph, or null for the default sigil.
+                  examples: ['⚔️']
+                banner_preset_id:
+                  type: string
+                  enum:
+                    - neon_grid
+                    - synthwave_sunset
+                    - matrix_rain
+                    - chrome_canyon
+                    - vapor_horizon
+                    - pulse_wave
+                    - retro_orbit
+                    - midnight_pulse
+                  examples: [synthwave_sunset]
+      responses:
+        '200':
+          description: The updated profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              examples:
+                updated:
+                  value:
+                    id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                    email: riley@example.com
+                    username: Riley_42
+                    display_name: Riley_42
+                    avatar: ⚔️
+                    banner_preset_id: synthwave_sunset
+                    total_xp: 2475
+                    created_at: '2026-10-01T09:12:00Z'
+                    updated_at: '2026-10-22T14:01:19Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [Users]
+      summary: Delete the current user's account
+      description: |
+        Requires a typed confirmation phrase. Deletes the account, its quests, and its
+        completions. Earned XP is not transferable and is not refunded elsewhere.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirmation]
+              properties:
+                confirmation:
+                  type: string
+                  const: DELETE MY ACCOUNT
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/users/me/password:
+    post:
+      tags: [Users]
+      summary: Change the current user's password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string, format: password }
+                new_password: { type: string, format: password, minLength: 8 }
+      responses:
+        '204':
+          description: Password changed.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/quests:
+    get:
+      tags: [Quests]
+      summary: List quests
+      description: |
+        Returns quests visible to the caller, annotated with the caller's **per-viewer**
+        state. The same quest may be `available` for one user and `in_progress` for
+        another, because any user may work any quest concurrently.
+
+        `status` filters on the caller's own state, not the quest's global state.
+      parameters:
+        - name: status
+          in: query
+          description: Filter by the caller's state for the quest.
+          schema:
+            type: string
+            enum: [available, in_progress, completed]
+          examples: [available]
+        - name: guild
+          in: query
+          description: Exact guild match, case-insensitive.
+          schema: { type: string }
+          examples: [Chores]
+        - name: q
+          in: query
+          description: |
+            Full-text search across name, description, guild, author name, and icon.
+          schema: { type: string }
+          examples: [kitchen]
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [guild, created_at, completed_at, xp_reward, name]
+            default: created_at
+          examples: [guild]
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+        - name: since
+          in: query
+          description: Delta sync — only records with `updated_at` strictly greater than this timestamp.
+          schema: { type: string, format: date-time }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: |
+            A page of quests. Every quest carries the caller's own `my_status`, so a
+            client can build the Available / In Progress / Completed lists and their
+            count badges from one response; the `status` query parameter is an
+            optional server-side optimisation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuestPage'
+              examples:
+                board:
+                  summary: The whole board in one page — mixed per-viewer states
+                  value:
+                    items:
+                      - id: a1b2c3d4-1111-4222-9333-444455556666
+                        name: Clean the kitchen
+                        description: Wipe the counters, take out the bins, run the dishwasher.
+                        icon: ⚡
+                        quest_type: task
+                        guild: Chores
+                        xp_reward: 50
+                        is_repeatable: true
+                        author_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        author_name: Riley_42
+                        status: available
+                        created_at: '2026-10-18T07:30:00Z'
+                        updated_at: '2026-10-18T07:30:00Z'
+                        completed_at: null
+                        completed_by_id: null
+                        completed_by_name: null
+                        completion_count: 0
+                        my_status: available
+                        my_progress_id: null
+                        my_completion_count: 0
+                      - id: 3d4e5f6a-4444-4555-9666-a77788889999
+                        name: Meditate for ten minutes
+                        description: No guild on this one. Breathe, count, breathe again.
+                        icon: 🧠
+                        quest_type: task
+                        guild: null
+                        xp_reward: 25
+                        is_repeatable: true
+                        author_id: 2b3c4d5e-6666-4777-8888-9999aaaabbbb
+                        author_name: Quiet_Runner
+                        status: available
+                        created_at: '2026-10-21T06:15:00Z'
+                        updated_at: '2026-10-21T06:15:00Z'
+                        completed_at: null
+                        completed_by_id: null
+                        completed_by_name: null
+                        completion_count: 0
+                        my_status: available
+                        my_progress_id: null
+                        my_completion_count: 0
+                      - id: c3d4e5f6-3333-4444-a555-866677778888
+                        name: Defeat the laundry mountain
+                        description: One pile became three. Fold everything, including the socks.
+                        icon: ⚙️
+                        quest_type: task
+                        guild: Chores
+                        xp_reward: 75
+                        is_repeatable: true
+                        author_id: 9d0e1f2a-4444-4555-a666-777788889999
+                        author_name: Sam_77
+                        status: in_progress
+                        created_at: '2026-10-21T18:40:00Z'
+                        updated_at: '2026-10-22T08:15:00Z'
+                        completed_at: null
+                        completed_by_id: null
+                        completed_by_name: null
+                        completion_count: 0
+                        my_status: in_progress
+                        my_progress_id: 71a2b3c4-5555-4666-8777-88889999aaaa
+                        my_completion_count: 0
+                      - id: d4e5f6a7-4444-4555-9666-a77788889999
+                        name: Conquer the inbox
+                        description: Zero unreads. It has been done.
+                        icon: 📡
+                        quest_type: task
+                        guild: Work
+                        xp_reward: 300
+                        is_repeatable: false
+                        author_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        author_name: Riley_42
+                        status: completed
+                        created_at: '2026-10-19T09:00:00Z'
+                        updated_at: '2026-10-22T10:42:00Z'
+                        completed_at: '2026-10-22T10:42:00Z'
+                        completed_by_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        completed_by_name: Riley_42
+                        completion_count: 1
+                        my_status: completed
+                        my_progress_id: 82b3c4d5-6666-4777-8888-9999aaaabbbb
+                        my_completion_count: 1
+                    next_cursor: null
+                available:
+                  summary: Two available quests — one on a guild, one with no guild
+                  value:
+                    items:
+                      - id: a1b2c3d4-1111-4222-9333-444455556666
+                        name: Clean the kitchen
+                        description: Wipe the counters, take out the bins, run the dishwasher.
+                        icon: ⚡
+                        quest_type: task
+                        guild: Chores
+                        xp_reward: 50
+                        is_repeatable: true
+                        author_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        author_name: Riley_42
+                        status: available
+                        created_at: '2026-10-18T07:30:00Z'
+                        updated_at: '2026-10-18T07:30:00Z'
+                        completed_at: null
+                        completed_by_id: null
+                        completed_by_name: null
+                        completion_count: 0
+                        my_status: available
+                        my_progress_id: null
+                        my_completion_count: 0
+                      - id: 3d4e5f6a-4444-4555-9666-a77788889999
+                        name: Meditate for ten minutes
+                        description: No guild on this one. Breathe, count, breathe again.
+                        icon: 🧠
+                        quest_type: task
+                        guild: null
+                        xp_reward: 25
+                        is_repeatable: true
+                        author_id: 2b3c4d5e-6666-4777-8888-9999aaaabbbb
+                        author_name: Quiet_Runner
+                        status: available
+                        created_at: '2026-10-21T06:15:00Z'
+                        updated_at: '2026-10-21T06:15:00Z'
+                        completed_at: null
+                        completed_by_id: null
+                        completed_by_name: null
+                        completion_count: 0
+                        my_status: available
+                        my_progress_id: null
+                        my_completion_count: 0
+                    next_cursor: null
+                inProgress:
+                  summary: A quest the caller is working
+                  value:
+                    items:
+                      - id: c3d4e5f6-3333-4444-a555-866677778888
+                        name: Defeat the laundry mountain
+                        description: One pile became three. Fold everything, including the socks.
+                        icon: ⚙️
+                        quest_type: task
+                        guild: Chores
+                        xp_reward: 75
+                        is_repeatable: true
+                        author_id: 9d0e1f2a-4444-4555-a666-777788889999
+                        author_name: Sam_77
+                        status: in_progress
+                        created_at: '2026-10-21T18:40:00Z'
+                        updated_at: '2026-10-22T08:15:00Z'
+                        completed_at: null
+                        completed_by_id: null
+                        completed_by_name: null
+                        completion_count: 0
+                        my_status: in_progress
+                        my_progress_id: 71a2b3c4-5555-4666-8777-88889999aaaa
+                        my_completion_count: 0
+                    next_cursor: null
+                completed:
+                  summary: A quest the caller completed
+                  value:
+                    items:
+                      - id: d4e5f6a7-4444-4555-9666-a77788889999
+                        name: Conquer the inbox
+                        description: Zero unreads. It has been done.
+                        icon: 📡
+                        quest_type: task
+                        guild: Work
+                        xp_reward: 300
+                        is_repeatable: false
+                        author_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        author_name: Riley_42
+                        status: completed
+                        created_at: '2026-10-19T09:00:00Z'
+                        updated_at: '2026-10-22T10:42:00Z'
+                        completed_at: '2026-10-22T10:42:00Z'
+                        completed_by_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        completed_by_name: Riley_42
+                        completion_count: 1
+                        my_status: completed
+                        my_progress_id: 82b3c4d5-6666-4777-8888-9999aaaabbbb
+                        my_completion_count: 1
+                    next_cursor: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Quests]
+      summary: Create a quest
+      description: |
+        Any authenticated user may create a quest. The `id` MUST be a client-generated
+        UUID v4 so that an offline create can be retried without duplicating the quest.
+        Replaying the same `id` returns the existing quest with `200 OK`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuestCreate'
+            examples:
+                full:
+                value:
+                  id: 6a7b8c9d-7777-4888-8999-aaaabbbbcccc
+                  name: Slay the laundry dragon
+                  description: One pile became three. Fold everything, including the socks.
+                  icon: 👾
+                  quest_type: challenge
+                  guild: Chores
+                  xp_reward: 75
+                  is_repeatable: true
+                minimal:
+                  summary: Minimal quest with no guild
+                  value:
+                    id: 7b8c9d0e-8888-4999-8aaa-bbbbccccdddd
+                    name: Buy milk
+                    quest_type: task
+                    xp_reward: 10
+      responses:
+        '201':
+          description: Quest created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quest'
+              examples:
+                created:
+                  value:
+                    id: 6a7b8c9d-7777-4888-8999-aaaabbbbcccc
+                    name: Slay the laundry dragon
+                    quest_type: challenge
+                    description: One pile became three. Fold everything, including the socks.
+                    icon: 👾
+                    guild: Chores
+                    xp_reward: 75
+                    is_repeatable: true
+                    author_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                    author_name: Riley_42
+                    status: available
+                    created_at: '2026-10-22T14:05:00Z'
+                    updated_at: '2026-10-22T14:05:00Z'
+                    completed_at: null
+                    completed_by_id: null
+                    completed_by_name: null
+                    completion_count: 0
+                    my_status: available
+                    my_progress_id: null
+                    my_completion_count: 0
+        '200':
+          description: |
+            The quest already exists with this `id` — returned when an offline create
+            is retried. The body is identical to the `201` response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quest'
+              examples:
+                alreadyExists:
+                  value:
+                    id: 6a7b8c9d-7777-4888-8999-aaaabbbbcccc
+                    name: Slay the laundry dragon
+                    quest_type: challenge
+                    description: One pile became three. Fold everything, including the socks.
+                    icon: 👾
+                    guild: Chores
+                    xp_reward: 75
+                    is_repeatable: true
+                    author_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                    author_name: Riley_42
+                    status: available
+                    created_at: '2026-10-22T14:05:00Z'
+                    updated_at: '2026-10-22T14:05:00Z'
+                    completed_at: null
+                    completed_by_id: null
+                    completed_by_name: null
+                    completion_count: 0
+                    my_status: available
+                    my_progress_id: null
+                    my_completion_count: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /api/v1/quests/{questId}:
+    parameters:
+      - $ref: '#/components/parameters/QuestId'
+    get:
+      tags: [Quests]
+      summary: Quest detail
+      responses:
+        '200':
+          description: The quest, annotated with the caller's state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quest'
+              examples:
+                detail:
+                  value:
+                    id: a1b2c3d4-1111-4222-9333-444455556666
+                    name: Clean the kitchen
+                    quest_type: task
+                    description: Wipe the counters, take out the bins, run the dishwasher.
+                    icon: ⚡
+                    guild: Chores
+                    xp_reward: 50
+                    is_repeatable: true
+                    author_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                    author_name: Riley_42
+                    status: available
+                    created_at: '2026-10-18T07:30:00Z'
+                    updated_at: '2026-10-18T07:30:00Z'
+                    completed_at: null
+                    completed_by_id: null
+                    completed_by_name: null
+                    completion_count: 0
+                    my_status: available
+                    my_progress_id: null
+                    my_completion_count: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Quests]
+      summary: Edit a quest
+      description: Only the quest's author may edit it. The author may not change `xp_reward` after any completion has been recorded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuestUpdate'
+            examples:
+              edit:
+                value:
+                  name: Clean the kitchen thoroughly
+                  description: Wipe the counters, take out the bins, run the dishwasher, mop the floor.
+                  icon: 🔌
+                  guild: Chores
+                  is_repeatable: false
+      responses:
+        '200':
+          description: The updated quest.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Quest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [Quests]
+      summary: Delete a quest
+      description: |
+        Only the quest's author may delete it. Deleting a quest removes it from every
+        board but does **not** refund XP already earned from its completions.
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/quests/{questId}/start:
+    parameters:
+      - $ref: '#/components/parameters/QuestId'
+    post:
+      tags: [Quests]
+      summary: Start (claim) a quest
+      description: |
+        Moves the quest into the caller's In Progress list. The quest is **not**
+        claimed exclusively — other users may start it concurrently, and each gets
+        their own `QuestProgress` row.
+      responses:
+        '201':
+          description: The caller's progress.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuestProgress'
+              examples:
+                started:
+                  value:
+                    id: 71a2b3c4-5555-4666-8777-88889999aaaa
+                    quest_id: a1b2c3d4-1111-4222-9333-444455556666
+                    user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                    status: in_progress
+                    started_at: '2026-10-22T14:10:00Z'
+                    updated_at: '2026-10-22T14:10:00Z'
+                    completed_at: null
+        '200':
+          description: The caller had already started this quest; the existing progress is returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuestProgress'
+              examples:
+                alreadyStarted:
+                  value:
+                    id: 71a2b3c4-5555-4666-8777-88889999aaaa
+                    quest_id: a1b2c3d4-1111-4222-9333-444455556666
+                    user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                    status: in_progress
+                    started_at: '2026-10-22T14:10:00Z'
+                    updated_at: '2026-10-22T14:10:00Z'
+                    completed_at: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/quests/{questId}/complete:
+    parameters:
+      - $ref: '#/components/parameters/QuestId'
+    post:
+      tags: [Quests]
+      summary: Complete a quest
+      description: |
+        Records a `QuestCompletion` and awards `xp_reward` to the caller.
+
+        - **Repeatable quest** — resets to `available` immediately and may be completed
+          again later, including by the same user.
+        - **Non-repeatable quest** — closes globally on the first completion and leaves
+          other users' Available lists.
+
+        The body MUST carry a client-generated `id` so an offline completion can be
+        retried without double-awarding XP. Replaying the same `id` returns the
+        original completion with `200 OK` and no additional XP.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                  description: Client-generated idempotency key.
+            examples:
+              completion:
+                value:
+                  id: 0c1d2e3f-1111-4222-9333-444455556666
+      responses:
+        '201':
+          description: Completion recorded and XP awarded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionResult'
+              examples:
+                completed:
+                  summary: Repeating a 50 XP quest — still level 7, no level-up
+                  value:
+                    completion:
+                      id: 0c1d2e3f-1111-4222-9333-444455556666
+                      quest_id: a1b2c3d4-1111-4222-9333-444455556666
+                      user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                      guild: Chores
+                      xp_awarded: 50
+                      completed_at: '2026-10-22T14:12:00Z'
+                    xp_awarded: 50
+                    total_xp: 2525
+                    level: 7
+                    title: Pulse Weaver
+                    level_up: false
+                    quest_status: available
+                levelUp:
+                  summary: A 500 XP quest that crosses the level 8 threshold
+                  value:
+                    completion:
+                      id: 0f1a2b3c-2222-4333-8444-955566667777
+                      quest_id: 1b2c3d4e-2222-4333-8444-955566667777
+                      user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                      guild: Fitness
+                      xp_awarded: 500
+                      completed_at: '2026-10-22T14:13:00Z'
+                    xp_awarded: 500
+                    total_xp: 2975
+                    level: 8
+                    title: Data Drifter
+                    level_up: true
+                    quest_status: available
+        '200':
+          description: |
+            This completion was already recorded (replayed offline mutation).
+            The original result is returned; no additional XP is awarded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionResult'
+              examples:
+                replayed:
+                  value:
+                    completion:
+                      id: 0c1d2e3f-1111-4222-9333-444455556666
+                      quest_id: a1b2c3d4-1111-4222-9333-444455556666
+                      user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                      guild: Chores
+                      xp_awarded: 50
+                      completed_at: '2026-10-22T14:12:00Z'
+                    xp_awarded: 50
+                    total_xp: 2525
+                    level: 7
+                    title: Pulse Weaver
+                    level_up: false
+                    quest_status: available
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: The quest is already closed by another user and is not repeatable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/quests/{questId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/QuestId'
+    post:
+      tags: [Quests]
+      summary: Cancel the caller's progress
+      description: Returns the quest to the caller's Available list. Only the caller's own progress is affected.
+      responses:
+        '204':
+          description: Cancelled.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/guilds:
+    get:
+      tags: [Guilds]
+      summary: Guilds and the caller's XP per guild
+      description: |
+        Guilds are derived, not entities. A guild exists because some quest carries
+        that tag. `guild_xp` is a **subset** of `total_xp` and never affects level.
+        Completions on quests with no guild contribute to `total_xp` only, so
+        `Σ guild_xp` may be less than `total_xp`.
+      responses:
+        '200':
+          description: The caller's guild breakdown.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuildBreakdown'
+              examples:
+                breakdown:
+                  value:
+                    total_xp: 2475
+                    guilds:
+                      - name: Chores
+                        xp: 1250
+                        quest_count: 6
+                      - name: Work
+                        xp: 1200
+                        quest_count: 4
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/leaderboard:
+    get:
+      tags: [Leaderboard]
+      summary: Leaderboard
+      description: |
+        Ranks users by XP. In `global` scope the ranking key is lifetime `total_xp`;
+        in `guild` scope it is the XP earned inside that guild (`xp` on the row).
+        `level` and `title` always derive from lifetime `total_xp`, never from the
+        scope XP. Each entry carries the fields needed to render the compact banner.
+      parameters:
+        - name: scope
+          in: query
+          schema:
+            type: string
+            enum: [global, guild]
+            default: global
+          examples: [global]
+        - name: guild
+          in: query
+          description: Required when `scope` is `guild`. Case-insensitive.
+          schema: { type: string }
+          examples: [Work]
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Ranked entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaderboardPage'
+              examples:
+                global:
+                  summary: Global scope — ranked by lifetime XP
+                  value:
+                    scope: global
+                    guild: null
+                    items:
+                      - rank: 1
+                        user_id: 7c8d9e0f-3333-4444-8555-666677778888
+                        display_name: Morgan_88
+                        avatar: 💻
+                        banner_preset_id: synthwave_sunset
+                        total_xp: 3150
+                        xp: 3150
+                        level: 8
+                        title: Data Drifter
+                      - rank: 2
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        display_name: Riley_42
+                        avatar: ⚔️
+                        banner_preset_id: neon_grid
+                        total_xp: 2475
+                        xp: 2475
+                        level: 7
+                        title: Pulse Weaver
+                      - rank: 3
+                        user_id: 9d0e1f2a-4444-4555-a666-777788889999
+                        display_name: Sam_77
+                        avatar: 👾
+                        banner_preset_id: matrix_rain
+                        total_xp: 1450
+                        xp: 1450
+                        level: 5
+                        title: Voltage Runner
+                      - rank: 4
+                        user_id: 1a2b3c4d-5555-4666-8777-88889999aaaa
+                        display_name: Ada_01
+                        avatar: 🏋️
+                        banner_preset_id: chrome_canyon
+                        total_xp: 900
+                        xp: 900
+                        level: 4
+                        title: Chrome Adept
+                      - rank: 5
+                        user_id: 2b3c4d5e-6666-4777-8888-9999aaaabbbb
+                        display_name: Quiet_Runner
+                        avatar: 🧠
+                        banner_preset_id: midnight_pulse
+                        total_xp: 420
+                        xp: 420
+                        level: 3
+                        title: Grid Scout
+                    next_cursor: null
+                guild:
+                  summary: Work scope — ranked by XP earned inside the guild
+                  value:
+                    scope: guild
+                    guild: Work
+                    items:
+                      - rank: 1
+                        user_id: 7c8d9e0f-3333-4444-8555-666677778888
+                        display_name: Morgan_88
+                        avatar: 💻
+                        banner_preset_id: synthwave_sunset
+                        total_xp: 3150
+                        xp: 1250
+                        level: 8
+                        title: Data Drifter
+                      - rank: 2
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        display_name: Riley_42
+                        avatar: ⚔️
+                        banner_preset_id: neon_grid
+                        total_xp: 2475
+                        xp: 1200
+                        level: 7
+                        title: Pulse Weaver
+                      - rank: 3
+                        user_id: 9d0e1f2a-4444-4555-a666-777788889999
+                        display_name: Sam_77
+                        avatar: 👾
+                        banner_preset_id: matrix_rain
+                        total_xp: 1450
+                        xp: 600
+                        level: 5
+                        title: Voltage Runner
+                      - rank: 4
+                        user_id: 1a2b3c4d-5555-4666-8777-88889999aaaa
+                        display_name: Ada_01
+                        avatar: 🏋️
+                        banner_preset_id: chrome_canyon
+                        total_xp: 900
+                        xp: 300
+                        level: 4
+                        title: Chrome Adept
+                      - rank: 5
+                        user_id: 2b3c4d5e-6666-4777-8888-9999aaaabbbb
+                        display_name: Quiet_Runner
+                        avatar: 🧠
+                        banner_preset_id: midnight_pulse
+                        total_xp: 420
+                        xp: 150
+                        level: 3
+                        title: Grid Scout
+                    next_cursor: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/meta/levels:
+    get:
+      tags: [Meta]
+      summary: Optional level and title override
+      description: |
+        The client ships a built-in level curve and title table. If the server returns
+        a table here, the client uses it instead. If this endpoint 404s or returns
+        malformed data, the client silently falls back to its built-in defaults.
+      responses:
+        '200':
+          description: The override table.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LevelConfig'
+              examples:
+                override:
+                  value:
+                    version: '2026-10-01'
+                    levels:
+                      - { level: 1, min_xp: 0, title: Signal Wanderer }
+                      - { level: 2, min_xp: 100, title: Neon Novice }
+                      - { level: 3, min_xp: 300, title: Grid Scout }
+                      - { level: 4, min_xp: 600, title: Chrome Adept }
+                      - { level: 5, min_xp: 1000, title: Voltage Runner }
+                      - { level: 6, min_xp: 1500, title: Alley Hacker }
+                      - { level: 7, min_xp: 2100, title: Pulse Weaver }
+                      - { level: 8, min_xp: 2800, title: Data Drifter }
+                      - { level: 9, min_xp: 3600, title: Neon Monk }
+                      - { level: 50, min_xp: 122500, title: Sovereign X }
+        '404':
+          description: No override configured. The client uses its built-in defaults.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/meta/banner-presets:
+    get:
+      tags: [Meta]
+      summary: Banner art presets
+      description: |
+        Presets are rendered procedurally by the client; only the descriptor is
+        transferred. `accent` is used for the banner border and glow.
+      responses:
+        '200':
+          description: The preset catalogue.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BannerPreset'
+              examples:
+                presets:
+                  value:
+                    items:
+                      - id: neon_grid
+                        name: Neon Grid
+                        accent: '#00E5FF'
+                        pattern: perspective_grid
+                      - id: synthwave_sunset
+                        name: Synthwave Sunset
+                        accent: '#FF2FB9'
+                        pattern: sunset
+                      - id: matrix_rain
+                        name: Matrix Rain
+                        accent: '#00FFA3'
+                        pattern: rain
+                      - id: chrome_canyon
+                        name: Chrome Canyon
+                        accent: '#7C4DFF'
+                        pattern: canyon
+                      - id: vapor_horizon
+                        name: Vapor Horizon
+                        accent: '#FFB300'
+                        pattern: horizon
+                      - id: pulse_wave
+                        name: Pulse Wave
+                        accent: '#00E5FF'
+                        pattern: rings
+                      - id: retro_orbit
+                        name: Retro Orbit
+                        accent: '#FF3D71'
+                        pattern: orbit
+                      - id: midnight_pulse
+                        name: Midnight Pulse
+                        accent: '#A79FC4'
+                        pattern: sweep
+
+  /api/v1/me/export:
+    get:
+      tags: [Users]
+      summary: Export the caller's personal data
+      description: Full portable export of the caller's profile, quests, progress, and completion history.
+      responses:
+        '200':
+          description: The export bundle.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportBundle'
+              examples:
+                export:
+                  value:
+                    exported_at: '2026-10-22T14:20:00Z'
+                    user:
+                      id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                      email: riley@example.com
+                      username: Riley_42
+                      display_name: Riley_42
+                      avatar: ⚔️
+                      banner_preset_id: neon_grid
+                      total_xp: 2475
+                      created_at: '2026-10-01T09:12:00Z'
+                      updated_at: '2026-10-22T13:58:04Z'
+                    quests: []
+                    completions:
+                      - id: 0c1d2e3f-1111-4222-9333-444455556666
+                        quest_id: a1b2c3d4-1111-4222-9333-444455556666
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        quest_type: task
+                        guild: Chores
+                        xp_awarded: 50
+                        completed_at: '2026-10-05T08:00:00Z'
+                      - id: 1d2e3f4a-2222-4333-8444-955566667777
+                        quest_id: c3d4e5f6-3333-4444-a555-866677778888
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        quest_type: task
+                        guild: Chores
+                        xp_awarded: 75
+                        completed_at: '2026-10-07T19:30:00Z'
+                      - id: 2e3f4a5b-3333-4444-a555-866677778888
+                        quest_id: e5f6a7b8-5555-4666-8777-88889999aaaa
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        quest_type: task
+                        guild: Chores
+                        xp_awarded: 250
+                        completed_at: '2026-10-11T12:10:00Z'
+                      - id: 3f4a5b6c-4444-4555-9666-a77788889999
+                        quest_id: f6a7b8c9-6666-4777-8888-8999aaaabbbb
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        quest_type: task
+                        guild: Chores
+                        xp_awarded: 25
+                        completed_at: '2026-10-12T07:45:00Z'
+                      - id: 4a5b6c7d-5555-4666-8777-88889999aaaa
+                        quest_id: 4e5f6a7b-5555-4666-8777-88889999aaaa
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        quest_type: task
+                        guild: Chores
+                        xp_awarded: 375
+                        completed_at: '2026-10-14T16:20:00Z'
+                      - id: 5b6c7d8e-6666-4777-8888-9999aaaabbbb
+                        quest_id: 5f6a7b8c-6666-4777-8888-8999aaaabbbb
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        quest_type: task
+                        guild: Chores
+                        xp_awarded: 475
+                        completed_at: '2026-10-16T13:00:00Z'
+                      - id: 6c7d8e9f-7777-4888-8999-aaaabbbbcccc
+                        quest_id: b2c3d4e5-2222-4333-8444-955566667777
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        quest_type: task
+                        guild: Work
+                        xp_awarded: 400
+                        completed_at: '2026-10-17T17:05:00Z'
+                      - id: 7d8e9f0a-8888-4999-8aaa-bbbbccccdddd
+                        quest_id: d4e5f6a7-4444-4555-9666-a77788889999
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        quest_type: task
+                        guild: Work
+                        xp_awarded: 300
+                        completed_at: '2026-10-22T10:42:00Z'
+                      - id: 8e9f0a1b-9999-4aaa-8bbb-ccccddddeeee
+                        quest_id: 6a7b8c9d-7777-4888-8999-aaaabbbbcccc
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        quest_type: task
+                        guild: Work
+                        xp_awarded: 200
+                        completed_at: '2026-10-20T11:25:00Z'
+                      - id: 9f0a1b2c-aaaa-4bbb-8ccc-ddddeeeeffff
+                        quest_id: 7b8c9d0e-8888-4999-8aaa-bbbbccccdddd
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        quest_type: task
+                        guild: Work
+                        xp_awarded: 300
+                        completed_at: '2026-10-21T15:55:00Z'
+                      - id: a0b1c2d3-abbb-4ccc-8ddd-eeeeffff0000
+                        quest_id: 3d4e5f6a-4444-4555-9666-a77788889999
+                        user_id: 3f2b1c44-8a2e-4f3b-9d11-6b0e5a7c1d90
+                        quest_type: task
+                        guild: null
+                        xp_awarded: 25
+                        completed_at: '2026-10-23T06:30:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: The `access_token` from `/auth/register` or `/auth/login`.
+
+  parameters:
+    QuestId:
+      name: questId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+      examples:
+        standard:
+          value: a1b2c3d4-1111-4222-9333-444455556666
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque pagination cursor from a previous response's `next_cursor`.
+      schema: { type: string }
+
+  responses:
+    Unauthorized:
+      description: Missing, invalid, or expired access token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            unauthorized:
+              value:
+                error:
+                  code: UNAUTHORIZED
+                  message: Your session has expired. Please sign in again.
+    Forbidden:
+      description: Authenticated, but not permitted to perform this action.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            forbidden:
+              value:
+                error:
+                  code: FORBIDDEN
+                  message: Only the author can change this quest.
+    NotFound:
+      description: No such resource.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            notFound:
+              value:
+                error:
+                  code: NOT_FOUND
+                  message: That quest no longer exists.
+    Conflict:
+      description: The resource already exists.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            conflict:
+              value:
+                error:
+                  code: EMAIL_TAKEN
+                  message: An account with that email already exists.
+    ValidationError:
+      description: The request body failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid:
+              value:
+                error:
+                  code: VALIDATION
+                  message: Give the quest an XP reward between 1 and 10000.
+                  field: xp_reward
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              examples: [VALIDATION]
+            message:
+              type: string
+              examples: [Give the quest an XP reward between 1 and 10000.]
+            field:
+              type: [string, 'null']
+              description: The offending field, when the error is a field-level validation failure.
+
+    Health:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        version:
+          type: string
+        server_time:
+          type: string
+          format: date-time
+
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 8
+        username:
+          type: [string, 'null']
+          maxLength: 40
+          description: Optional. When omitted, the server generates a themed anonymous display name.
+        avatar:
+          type: [string, 'null']
+          maxLength: 8
+          description: Optional emoji glyph.
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password }
+
+    AuthResponse:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in, user]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, const: Bearer }
+        expires_in: { type: integer, description: Access token lifetime in seconds. }
+        user:
+          $ref: '#/components/schemas/User'
+
+    User:
+      type: object
+      required: [id, email, display_name, banner_preset_id, total_xp, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        username:
+          type: [string, 'null']
+          description: Null when the user has not chosen one.
+        display_name:
+          type: string
+          description: The name shown in the UI. Equals `username` when set, otherwise a themed anonymous name.
+        avatar:
+          type: [string, 'null']
+          description: Emoji glyph, or null for the default sigil.
+        banner_preset_id:
+          type: string
+          enum:
+            - neon_grid
+            - synthwave_sunset
+            - matrix_rain
+            - chrome_canyon
+            - vapor_horizon
+            - pulse_wave
+            - retro_orbit
+            - midnight_pulse
+        total_xp:
+          type: integer
+          minimum: 0
+          description: Sum of xp_awarded over all of the user's completions. The only input to level.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Quest:
+      type: object
+      required:
+        [id, name, quest_type, xp_reward, is_repeatable, author_id, author_name, status,
+         created_at, updated_at, completion_count, my_status, my_completion_count]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, minLength: 1, maxLength: 80 }
+        quest_type:
+          type: string
+          enum: [task, challenge, raid, event, bounty]
+          default: task
+          description: Quest category. Guilds are optional for all quest types.
+        description:
+          type: [string, 'null']
+          maxLength: 500
+          description: Optional free text. Searched by the `q` parameter.
+        icon:
+          type: [string, 'null']
+          maxLength: 8
+          description: Optional emoji glyph from the curated tech/synth set.
+        guild:
+          type: [string, 'null']
+          maxLength: 60
+          description: Optional free-text tag. Not an entity. Guilds are optional regardless of quest_type.
+        xp_reward: { type: integer, minimum: 1, maximum: 10000 }
+        is_repeatable: { type: boolean, default: false }
+        author_id: { type: string, format: uuid }
+        author_name:
+          type: string
+          description: Denormalized for display and for search.
+        status:
+          type: string
+          enum: [available, in_progress, completed]
+          description: The quest's global status.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+          description: Null unless closed (non-repeatable) or on the most recent completion (repeatable).
+        completed_by_id: { type: [string, 'null'], format: uuid }
+        completed_by_name: { type: [string, 'null'] }
+        completion_count:
+          type: integer
+          minimum: 0
+          description: Total completions across all users.
+        my_status:
+          type: string
+          enum: [available, in_progress, completed]
+          description: The caller's own state for this quest.
+        my_progress_id:
+          type: [string, 'null']
+          format: uuid
+        my_completion_count:
+          type: integer
+          minimum: 0
+          description: How many times the caller completed this quest.
+
+    QuestCreate:
+      type: object
+      required: [id, name, quest_type, xp_reward]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Client-generated. Doubles as the idempotency key.
+        name: { type: string, minLength: 1, maxLength: 80 }
+        quest_type:
+          type: string
+          enum: [task, challenge, raid, event, bounty]
+          default: task
+          description: Quest category. Guilds are optional for all quest types.
+        description: { type: [string, 'null'], maxLength: 500 }
+        icon: { type: [string, 'null'], maxLength: 8 }
+        guild: { type: [string, 'null'], maxLength: 60 }
+        xp_reward: { type: integer, minimum: 1, maximum: 10000 }
+        is_repeatable: { type: boolean, default: false }
+
+    QuestUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 80 }
+        quest_type:
+          type: string
+          enum: [task, challenge, raid, event, bounty]
+          description: Quest category. Guilds are optional for all quest types.
+        description: { type: [string, 'null'], maxLength: 500 }
+        icon: { type: [string, 'null'], maxLength: 8 }
+        guild: { type: [string, 'null'], maxLength: 60 }
+        xp_reward:
+          type: integer
+          minimum: 1
+          maximum: 10000
+          description: May not be changed once any completion has been recorded.
+        is_repeatable: { type: boolean }
+
+    QuestProgress:
+      type: object
+      required: [id, quest_id, user_id, status, started_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        quest_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [in_progress, completed]
+        started_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
+
+    QuestCompletion:
+      type: object
+      required: [id, quest_id, user_id, xp_awarded, completed_at]
+      description: |
+        Append-only. Never mutated and never deleted. This log is the source of truth
+        for both `total_xp` and `guild_xp`.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Client-generated. Doubles as the idempotency key.
+        quest_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        guild:
+          type: [string, 'null']
+          description: Denormalized from the quest at completion time so history survives a rename.
+        xp_awarded: { type: integer, minimum: 1 }
+        completed_at: { type: string, format: date-time }
+
+    CompletionResult:
+      type: object
+      required: [completion, xp_awarded, total_xp, level, title, level_up, quest_status]
+      properties:
+        completion:
+          $ref: '#/components/schemas/QuestCompletion'
+        xp_awarded:
+          type: integer
+          description: XP credited by this completion.
+        total_xp:
+          type: integer
+          description: The caller's total XP after this completion.
+        level:
+          type: integer
+          description: Derived level after this completion.
+        title:
+          type: string
+          description: Derived title after this completion.
+        level_up:
+          type: boolean
+          description: True when this completion crossed a level threshold. Drives the level-up sound and animation.
+        quest_status:
+          type: string
+          enum: [available, in_progress, completed]
+          description: The quest's status after the completion.
+
+    QuestPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Quest'
+        next_cursor:
+          type: [string, 'null']
+
+    GuildBreakdown:
+      type: object
+      required: [total_xp, guilds]
+      properties:
+        total_xp: { type: integer, minimum: 0 }
+        guilds:
+          type: array
+          items:
+            $ref: '#/components/schemas/GuildSummary'
+
+    GuildSummary:
+      type: object
+      required: [name, xp, quest_count]
+      properties:
+        name: { type: string }
+        xp:
+          type: integer
+          minimum: 0
+          description: XP earned on quests in this guild. Always a subset of total_xp.
+        quest_count:
+          type: integer
+          minimum: 0
+          description: Number of quests the caller can see carrying this guild tag.
+
+    LeaderboardEntry:
+      type: object
+      required: [rank, user_id, display_name, banner_preset_id, total_xp, xp, level, title]
+      properties:
+        rank: { type: integer, minimum: 1 }
+        user_id: { type: string, format: uuid }
+        display_name: { type: string }
+        avatar: { type: [string, 'null'] }
+        banner_preset_id: { type: string }
+        total_xp:
+          type: integer
+          minimum: 0
+          description: Lifetime XP. Always the basis for `level` and `title`.
+        xp:
+          type: integer
+          minimum: 0
+          description: The XP used for ranking — lifetime XP in global scope, guild XP in guild scope.
+        level: { type: integer, minimum: 1 }
+        title: { type: string }
+
+    LeaderboardPage:
+      type: object
+      required: [scope, items]
+      properties:
+        scope: { type: string, enum: [global, guild] }
+        guild: { type: [string, 'null'] }
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/LeaderboardEntry'
+        next_cursor: { type: [string, 'null'] }
+
+    LevelConfig:
+      type: object
+      required: [version, levels]
+      description: |
+        An override for the client's built-in level curve. If absent or malformed, the
+        client uses `cumXP(L) = 50 * (L-1) * L` and the built-in title table.
+      properties:
+        version:
+          type: string
+          description: Opaque version string. The client re-fetches when this changes.
+        levels:
+          type: array
+          items:
+            $ref: '#/components/schemas/LevelEntry'
+
+    LevelEntry:
+      type: object
+      required: [level, min_xp, title]
+      properties:
+        level: { type: integer, minimum: 1 }
+        min_xp:
+          type: integer
+          minimum: 0
+          description: Cumulative XP required to reach this level.
+        title: { type: string }
+
+    BannerPreset:
+      type: object
+      required: [id, name, accent, pattern]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        accent:
+          type: string
+          description: Hex colour used for the banner border and glow.
+          examples: ['#00E5FF']
+        pattern:
+          type: string
+          description: |
+            Procedural pattern key, rendered client-side by a CustomPainter.
+            One of: perspective_grid, sunset, rain, canyon, horizon, rings, orbit, sweep.
+          examples: [perspective_grid]
+
+    ExportBundle:
+      type: object
+      required: [exported_at, user, quests, completions]
+      properties:
+        exported_at: { type: string, format: date-time }
+        user:
+          $ref: '#/components/schemas/User'
+        quests:
+          type: array
+          items:
+            $ref: '#/components/schemas/Quest'
+        completions:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuestCompletion'

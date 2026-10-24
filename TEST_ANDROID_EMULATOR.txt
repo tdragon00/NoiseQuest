@@ -1,0 +1,127 @@
+QUESTBOARD — TEST ON ANDROID EMULATOR (Ubuntu 24.04)
+=======================================================
+
+APK is already built in:
+  build/app/outputs/flutter-apk/app-debug.apk
+(or app-release.apk)
+
+You have an emulator: Medium_Phone_API_37.0 (API 37)
+
+---------------------------------------------------------------
+1) SET ENVIRONMENT
+---------------------------------------------------------------
+Open a terminal in ~/Desktop/Noisequest or just run:
+
+export ANDROID_HOME="$HOME/Android/Sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator"
+
+Add to ~/.bashrc if you want permanent setup.
+
+---------------------------------------------------------------
+2) START EMULATOR (if not running)
+---------------------------------------------------------------
+List AVDs:
+  $ANDROID_HOME/emulator/emulator -list-avds
+
+Start the emulator:
+  $ANDROID_HOME/empmulator? Use: 
+  nohup $ANDROID_HOME/emulator/emulator @Medium_Phone_API_37.0 -gpu swiftshader_indirect >/tmp/emulator.log 2>&1 &
+# wait ~30-60 seconds for boot
+
+Check device is online:
+  $ANDROID_HOME/platform-tools/adb devices
+# should show: emulator-5554	device
+
+---------------------------------------------------------------
+3) INSTALL THE APK
+---------------------------------------------------------------
+Debug APK (fastest):
+  cd ~/Desktop/Noisequest
+  $ANDROID_HOME/platform-tools/adb install -r build/app/outputs/flutter-apk/app-debug.apk
+
+Release APK:
+  $ANDROID_HOME/platform-tools/adb install -r build/app/outputs/flutter-apk/app-release.apk
+
+If install fails with "INSTALL_FAILED_UPDATE_INCOMPATIBLE":
+  $ANDROID_HOME/platform-tools/adb uninstall com.noisequest.noisequest
+  $ANDROID_HOME/platform-tools/adb install -r build/app/outputs/flutter-apk/app-debug.apk
+
+---------------------------------------------------------------
+4) MAKE THE API VISIBLE TO THE EMULATOR
+---------------------------------------------------------------
+127.0.0.1 on the emulator means the emulator itself. You need to
+connect to your host PC.
+
+Option A: ADB reverse (easiest, USB/emulator on same machine)
+  $ANDROID_HOME/platform-tools/adb reverse tcp:4010 tcp:4010
+  Then use endpoint: http://127.0.0.1:4010
+
+Option B: Host LAN IP (works for physical devices too)
+  Find your IP: ip addr show | grep inet
+  Example: 192.168.1.XXX
+  Prism must listen on all interfaces:
+    npx @stoplight/prism-cli mock openapi.yaml -p 4010 -h 0.0.0.0
+  Use endpoint: http://192.168.1.XXX:4010
+
+Option C: 10.0.2.2 (special Android emulator alias)
+  Use endpoint: http://10.0.2.2:4010
+  Prism still needs to listen on 0.0.0.0 or on 10.0.2.2? 
+  Better to listen on 0.0.0.0: -h 0.0.0.0
+
+IMPORTANT: Prism must be running in the terminal before testing.
+Start Prism:
+  cd ~/Desktop/Noisequest
+  npx @stoplight/prism-cli mock openapi.yaml -p 4010 -h 0.0.0.0
+
+---------------------------------------------------------------
+5) RUN & TEST
+---------------------------------------------------------------
+1. Open the "Questboard" app on the emulator.
+2. Connect screen: enter one of:
+     http://127.0.0.1:4010  (if using adb reverse)
+     http://10.0.2.2:4010    (if using emulator alias)
+     http://192.168.1.XXX:4010 (if using LAN IP)
+   Click Continue.
+3. Language → Continue.
+4. Create account or Sign in.
+5. Test:
+   - Guild Board loads with Riley_42 seed data
+   - Create Quest (+ button)
+   - Start / Complete quests
+   - Edit Banner (tap banner) → Save (returns to board)
+   - Leaderboards / Settings
+   - Offline: turn off wifi/mobile on emulator or stop Prism → queue actions
+   - Rotate screen for responsive layout
+   - Check sound/haptics work on emulator
+
+---------------------------------------------------------------
+6) HOT RUN FROM FLUTTER (optional)
+---------------------------------------------------------------
+If you want logs + hot reload:
+  cd ~/Desktop/Noisequest
+  export ANDROID_HOME="$HOME/Android/Sdk"
+  export PATH="$PATH:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin"
+  ~/.local/bin/flutter run -d emulator-5554
+
+Useful keys: r (reload), R (restart), q (quit)
+
+---------------------------------------------------------------
+TROUBLESHOOTING
+---------------------------------------------------------------
+- "Server unreachable": use 10.0.2.2 or adb reverse + Prism on 0.0.0.0
+- "INSTALL_FAILED_UPDATE_INCOMPATIBLE": uninstall old com.noisequest.noisequest
+- "Waiting for device": check adb devices, restart adb: adb kill-server && adb start-server
+- Emulator black screen: use -gpu swiftshader_indirect or host GPU
+- Cleartext traffic: already enabled in AndroidManifest (android:usesCleartextTraffic="true")
+- Min SDK: set to 23 (already done)
+- Network security: for http LAN endpoints fine on API 37 debug builds
+- Logs: adb logcat | grep -i flutter or tail -30 /tmp/emulator.log
+
+---------------------------------------------------------------
+QUICK ONE-LINER TEST
+---------------------------------------------------------------
+export ANDROID_HOME="$HOME/Android/Sdk" && export PATH="$PATH:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator" && \
+adb reverse tcp:4010 tcp:4010 && \
+adb install -r ~/Desktop/Noisequest/build/app/outputs/flutter-apk/app-debug.apk && \
+echo "Installed. Start Prism on 0.0.0.0:4010 and use http://127.0.0.1:4010 on emulator"

@@ -1,0 +1,172 @@
+QUESTBOARD — ANDROID STUDIO / SDK SETUP (Ubuntu 24.04)
+=======================================================
+
+You have two options. Option A is easiest if you want the GUI editor.
+Option B is smaller if you only need the SDK to build/run the APK from
+the terminal. You do NOT need both.
+
+---------------------------------------------------------------
+OPTION A — ANDROID STUDIO (recommended for beginners)
+---------------------------------------------------------------
+
+1. Install Android Studio using the official Snap package:
+
+       sudo snap install android-studio --classic
+
+   Alternative (if you prefer the tarball):
+   - Download from https://developer.android.com/studio
+   - Extract it:
+         tar -xzf android-studio-*.tar.gz -C ~/development
+   - Run the installer:
+         ~/development/android-studio/bin/studio.sh
+   - Choose "Standard" installation in the setup wizard.
+
+2. Launch Android Studio once and let the Setup Wizard finish.
+   It downloads the Android SDK, platform tools and a JDK.
+
+   Default SDK location:
+       ~/Android/Sdk
+
+3. Add the SDK tools to your PATH. Edit ~/.bashrc:
+
+       nano ~/.bashrc
+
+   Add these lines at the end:
+
+       export ANDROID_HOME="$HOME/Android/Sdk"
+       export ANDROID_SDK_ROOT="$ANDROID_HOME"
+       export PATH="$PATH:$ANDROID_HOME/cmdline-tools/latest/bin"
+       export PATH="$PATH:$ANDROID_HOME/platform-tools"
+       export PATH="$PATH:$ANDROID_HOME/emulator"
+
+   Save (Ctrl+O, Enter, Ctrl+X) and reload:
+
+       source ~/.bashrc
+
+4. Verify:
+
+       flutter doctor -v
+
+   The "Android toolchain" section should be green (or only complain
+   about licenses, which step 5 fixes).
+
+5. Accept the SDK licenses:
+
+       flutter doctor --android-licenses
+
+   Press "y" for every prompt.
+
+6. Check devices:
+
+       flutter devices
+
+   For a physical phone:
+   - Enable Developer Options: Settings > About phone > tap "Build number" 7 times.
+   - Enable USB debugging in Developer Options.
+   - Connect by USB and approve the "Allow USB debugging" prompt.
+   - If the device is not detected, install udev rules:
+         sudo apt install android-sdk-platform-tools-common
+     then unplug/replug the phone.
+
+7. Run the app:
+
+       cd ~/Desktop/Noisequest
+       flutter run -d <device-id>
+
+   Or build an installable APK:
+
+       flutter build apk --release
+       # output: build/app/outputs/flutter-apk/app-release.apk
+
+---------------------------------------------------------------
+OPTION B — COMMAND-LINE SDK ONLY (no Android Studio GUI)
+---------------------------------------------------------------
+
+1. Install a JDK (Android Gradle builds need Java 17):
+
+       sudo apt update
+       sudo apt install openjdk-17-jdk unzip wget
+
+2. Download the Android command-line tools:
+
+       mkdir -p ~/Android/Sdk/cmdline-tools
+       cd ~/Android/Sdk/cmdline-tools
+       wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+       unzip commandlinetools-linux-*_latest.zip
+       mv cmdline-tools latest
+       rm commandlinetools-linux-*_latest.zip
+
+   (If that URL is outdated, get the current "Linux" download from
+   https://developer.android.com/studio#command-line-tools-only )
+
+3. Set environment variables in ~/.bashrc:
+
+       export ANDROID_HOME="$HOME/Android/Sdk"
+       export ANDROID_SDK_ROOT="$ANDROID_HOME"
+       export PATH="$PATH:$ANDROID_HOME/cmdline-tools/latest/bin"
+       export PATH="$PATH:$ANDROID_HOME/platform-tools"
+
+   Reload:
+
+       source ~/.bashrc
+
+4. Install the SDK packages Flutter needs:
+
+       sdkmanager --licenses
+       sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+   Press "y" to accept licenses when prompted.
+
+   If Flutter complains about a different compileSdk version, install
+   that platform too, e.g.:
+       sdkmanager "platforms;android-34" "build-tools;34.0.0"
+
+5. Verify Flutter sees the toolchain:
+
+       flutter doctor -v
+
+   If it still says "No Android SDK found", point Flutter at it:
+
+       flutter config --android-sdk "$HOME/Android/Sdk"
+
+6. Build or run:
+
+       cd ~/Desktop/Noisequest
+       flutter build apk --release
+       flutter run -d <device-id>
+
+---------------------------------------------------------------
+PHONE-SPECIFIC NOTE (PinePhone / postmarketOS)
+---------------------------------------------------------------
+- Building the APK works on your Ubuntu machine; you do not need the
+  SDK on the phone itself.
+- Copy the APK to the phone and install it, or use adb over USB/SSH:
+      adb install build/app/outputs/flutter-apk/app-release.apk
+- On some community Android images you may need to allow "Install from
+  unknown sources" for the file manager you use.
+
+---------------------------------------------------------------
+TROUBLESHOOTING
+---------------------------------------------------------------
+- "cmdline-tools component is missing":
+      sdkmanager "cmdline-tools;latest"
+
+- "Android license status unknown":
+      flutter doctor --android-licenses
+
+- "Unsupported class file major version":
+  You are on the wrong Java version. Install/select JDK 17:
+      sudo update-alternatives --config java
+
+- "SDK location not found":
+      flutter config --android-sdk "$HOME/Android/Sdk"
+  or create android/local.properties with:
+      sdk.dir=/home/YOUR_USER/Android/Sdk
+
+- Gradle download is slow or blocked:
+  Re-run the build; Gradle resumes cached downloads. Corporate
+  proxies may need entries in ~/.gradle/gradle.properties.
+
+- Disk space: Android Studio + SDK + Gradle caches can use 8–12 GB.
+  Check with:
+      df -h ~
